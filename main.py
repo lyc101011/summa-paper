@@ -24,8 +24,22 @@ class DailyAgent:
         self.processor = PaperProcessor()
         self.feishu = FeishuService()
         self.oss = OSSService()
+        self.is_running = False
 
     async def run(self, target_date: Optional[str] = None):
+        if self.is_running:
+            logger.warning("Agent 任务正在执行中，跳过本次触发。")
+            return
+        self.is_running = True
+        try:
+            await self._do_run(target_date)
+        except Exception as e:
+            logger.error(f"Agent execution failed: {e}")
+            raise e
+        finally:
+            self.is_running = False
+
+    async def _do_run(self, target_date: Optional[str] = None):
         logger.info("=== 启动 Daily Arxiv Agent ===")
         
         if not target_date:
@@ -153,13 +167,36 @@ def scheduled_job():
     # AsyncIOScheduler will automatically run the coroutine in its event loop
     asyncio.create_task(agent.run())
 
+def check_daily_task_job():
+    """Run every 15 minutes to check if today's task is completed."""
+    now = datetime.now(pytz.timezone('Asia/Shanghai'))
+    from datetime import timedelta
+    yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    import os
+    daily_dir = agent.storage._get_daily_dir(yesterday_str)
+    report_path = os.path.join(daily_dir, "report.md")
+    
+    if not os.path.exists(report_path):
+        if not getattr(agent, "is_running", False):
+            logger.info(f"15分钟巡检: 检测到今日报表 {report_path} 未生成，且系统未在运行，已触发补偿执行。")
+            asyncio.create_task(agent.run())
+        else:
+            logger.info("15分钟巡检: 任务正在执行中，无需补偿。")
+    else:
+        logger.debug("15分钟巡检: 今日任务已顺利完成。")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the background scheduler on app startup and shutdown."""
     # Example: Run every day at 09:00 AM Shanghai time
     scheduler.add_job(scheduled_job, 'cron', hour=9, minute=0)
+    
+    # 增加 15 分钟补偿检查任务
+    scheduler.add_job(check_daily_task_job, 'interval', minutes=15)
+    
     scheduler.start()
-    logger.info("APScheduler started: daily arxiv task scheduled at 09:00 AM (Asia/Shanghai).")
+    logger.info("APScheduler started: daily arxiv task scheduled at 09:00 AM, with 15-minute compensation checks.")
     
     # 检查补偿逻辑：如果当前时间大于 9 点且昨天的论文还没处理过，立即触发一次
     now = datetime.now(pytz.timezone('Asia/Shanghai'))
