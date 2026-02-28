@@ -1,0 +1,201 @@
+import asyncio
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+import pytz
+
+from fastapi import FastAPI, BackgroundTasks, Query
+from contextlib import asynccontextmanager
+import uvicorn
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from tqdm import tqdm
+
+from app.core.config import settings
+from app.utils.logger import logger
+from app.utils.storage import StorageManager
+from app.fetcher.arxiv_fetcher import ArxivFetcher
+from app.processor.paper_processor import PaperProcessor
+from app.services.feishu_service import FeishuService
+from app.services.oss_service import OSSService
+
+class DailyAgent:
+    def __init__(self):
+        self.storage = StorageManager()
+        self.fetcher = ArxivFetcher()
+        self.processor = PaperProcessor()
+        self.feishu = FeishuService()
+        self.oss = OSSService()
+
+    async def run(self, target_date: Optional[str] = None):
+        logger.info("=== 启动 Daily Arxiv Agent ===")
+        
+        if not target_date:
+            # 默认抓取前一天的论文（取决于当前时间，通常arxiv的更新在 UTC 晚间，这里以当前日期为例）
+            # 由于 arXiv API 查的是 past 24-48 hours，用今天或昨天都能做 storage key
+            # 用户要求默认前一天，我们在 storage key 里标前一天
+            from datetime import timedelta
+            yesterday = datetime.now() - timedelta(days=1)
+            date_str = yesterday.strftime("%Y-%m-%d")
+        else:
+            date_str = target_date
+        
+        # 1. 加载历史所有已处理文献以及今日进度
+        global_papers = self.storage.load_global_papers()
+        processed_data = self.storage.load_daily_papers(date_str)
+        
+        # 2. 从 Arxiv 获取新论文
+        raw_papers = self.fetcher.fetch_recent_papers()
+        if not raw_papers:
+            logger.info("今日未获取到新论文。")
+            return
+            
+        high_quality_papers = []
+        
+        # 3. 处理论文（过滤与提取）
+        for paper in tqdm(raw_papers, desc=f"Processing {len(raw_papers)} papers"):
+            paper_id = paper['id']
+            
+            # 检查是否曾在历史中处理过并且成功
+            cached_file_path = global_papers.get(paper_id)
+            if cached_file_path:
+                # Load the specific daily file where this paper was processed
+                import os
+                if os.path.exists(cached_file_path):
+                    with open(cached_file_path, 'r', encoding='utf-8') as f:
+                        import json
+                        historical_data = json.load(f)
+                        
+                        # 兼容旧的文件级和新的单文件级缓存
+                        if "id" in historical_data and "status" in historical_data:
+                            result = historical_data
+                        else:
+                            result = historical_data.get(paper_id)
+                        
+                        if result and result.get("status") != "error" and not str(result.get("analysis_text", "")).startswith("Processing Error"):
+                            logger.info(f"论文 {paper_id} 已在历史记录 {cached_file_path} 中且处理成功，跳过大模型调用。")
+                            processed_data[paper_id] = result
+                            
+                            if result.get("is_worth_reading", False):
+                                high_quality_papers.append(result)
+                            continue
+            
+            # 如果没跳过（没处理过或报错了），则调用大模型处理
+            result = await self.processor.process_paper(paper)
+            # 记录原始元数据
+            result.update({
+                "id": paper_id,
+                "title": paper["title"],
+                "link": paper["link"],
+                "pdf_url": paper["pdf_url"],
+                "processed_date": date_str
+            })
+                
+            # 更新全局归档记录 (只记文件路径以节省空间)
+            # The global dict now points to the individual daily json files.
+            saved_path = self.storage.save_daily_paper(result, date_str)
+            global_papers[paper_id] = saved_path if saved_path else f"data/{date_str}/papers/{paper_id}.json"
+            self.storage.save_global_papers(global_papers)
+            
+            # 记录今天的处理结果以便后续调用
+            processed_data[paper_id] = result
+            
+            if result.get("is_worth_reading", False):
+                high_quality_papers.append(result)
+                
+        # 4. 生成报告 (Markdown 简版 只含推荐, HTML 完整版含所有已处理的)
+        logger.info(f"共有 {len(high_quality_papers)} 篇高质量论文，开始调用大模型生成总结报告。")
+        
+        # Sort papers for HTML: Passed ones first, then rejected ones
+        all_processed_today = list(processed_data.values())
+        all_processed_today.sort(key=lambda x: not x.get('is_worth_reading', False))
+        
+        html_report = await self.processor.generate_html_report(all_processed_today)
+        
+        # 5. 上传 HTML 报告到阿里云 OSS
+        oss_url = ""
+        if html_report and "生成 HTML 日报时发生错误" not in html_report:
+            # 文件名按日期和时间戳，避免冲突
+            timestamp = datetime.now().strftime("%H%M%S")
+            object_name = f"prod/html/summa-paper/{date_str}_{timestamp}.html"
+            oss_url = self.oss.put_object(object_name, html_report)
+            
+        # 6. 生成极简版飞书 Markdown 消息，附带 OSS 链接
+        papers_context_for_feishu = self.processor._format_papers_context(high_quality_papers)
+        # We append the OSS URL context so the LLM knows what link to refer to
+        if oss_url:
+            papers_context_for_feishu += f"\n\n完整 HTML 深度评测报告链接（请务必在生成文案结尾附上此地址供大家点击阅读）: {oss_url}"
+            
+        from app.core.prompts import REPORT_GENERATOR_PROMPT
+        prompt = REPORT_GENERATOR_PROMPT.format(papers_content=papers_context_for_feishu)
+        try:
+            markdown_summary = await self.processor.llm_service.chat_completion(
+                model=self.processor.llm_service.llm_model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+        except Exception as e:
+            logger.error(f"Error generating batch Feishu report: {e}")
+            markdown_summary = f"生成极简日报时发生错误：{e}\n\n完整报告请查看: {oss_url}"
+        
+        # 7. 保存生成的报告文件到本地目录中
+        self.storage.save_daily_report(markdown_summary, html_report, date_str)
+        
+        # 8. 发送至飞书
+        title = f"Arxiv 每日精选 - {date_str}"
+        await self.feishu.send_markdown(title, markdown_summary)
+        
+        logger.info("=== Daily Arxiv Agent 执行完毕 ===")
+
+agent = DailyAgent()
+scheduler = AsyncIOScheduler(timezone=pytz.timezone('Asia/Shanghai'))
+
+def scheduled_job():
+    """Timer job for apscheduler to trigger agent run."""
+    logger.info("Scheduler triggered daily arXiv extraction.")
+    # AsyncIOScheduler will automatically run the coroutine in its event loop
+    asyncio.create_task(agent.run())
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage the background scheduler on app startup and shutdown."""
+    # Example: Run every day at 09:00 AM Shanghai time
+    scheduler.add_job(scheduled_job, 'cron', hour=9, minute=0)
+    scheduler.start()
+    logger.info("APScheduler started: daily arxiv task scheduled at 09:00 AM (Asia/Shanghai).")
+    
+    # 检查补偿逻辑：如果当前时间大于 9 点且昨天的论文还没处理过，立即触发一次
+    now = datetime.now(pytz.timezone('Asia/Shanghai'))
+    if now.hour >= 9:
+        from datetime import timedelta
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        # 判断昨天的记录是否存在
+        import os
+        daily_dir = agent.storage._get_daily_dir(yesterday)
+        report_path = os.path.join(daily_dir, "report.md")
+        if not os.path.exists(report_path):
+            logger.info("Startup Check: missed today's 09:00 AM run. Triggering recovery run now for yesterday's papers.")
+            asyncio.create_task(agent.run(yesterday))
+        else:
+            logger.info("Startup Check: today's run was already completed.")
+            
+    yield
+    
+    # Shutdown
+    scheduler.shutdown()
+    logger.info("APScheduler stopped.")
+
+app = FastAPI(title="Arxiv Summary Agent API", lifespan=lifespan)
+
+@app.post("/api/run")
+async def trigger_agent(
+    background_tasks: BackgroundTasks, 
+    target_date: Optional[str] = Query(None, description="目标日期格式: YYYY-MM-DD，默认前一天")
+):
+    """
+    手动触发 Arxiv 论文抓取与分析任务。
+    任务会在后台异步执行。
+    """
+    background_tasks.add_task(agent.run, target_date)
+    return {"status": "success", "message": f"任务已在后台启动，目标日期: {target_date or '默认(前一天)'}"}
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
