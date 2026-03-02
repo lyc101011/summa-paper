@@ -12,7 +12,6 @@ class Settings(BaseSettings):
     
     # Arxiv Settings
     ARXIV_QUERY: str = "cat:cs.AI"
-    ARXIV_MAX_RESULTS: int = 200
     
     # Aliyun OSS Settings
     ALIYUN_OSS_ACCESS_KEY_ID: str = ""

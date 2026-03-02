@@ -57,7 +57,7 @@ class DailyAgent:
         processed_data = self.storage.load_daily_papers(date_str)
         
         # 2. 从 Arxiv 获取新论文
-        raw_papers = self.fetcher.fetch_recent_papers()
+        raw_papers = self.fetcher.fetch_recent_papers(target_date=date_str)
         if not raw_papers:
             logger.info("今日未获取到新论文。")
             return
@@ -190,7 +190,7 @@ def check_daily_task_job():
 async def lifespan(app: FastAPI):
     """Manage the background scheduler on app startup and shutdown."""
     # Example: Run every day at 09:00 AM Shanghai time
-    scheduler.add_job(scheduled_job, 'cron', hour=9, minute=0)
+    scheduler.add_job(scheduled_job, 'cron', hour=7, minute=0)
     
     # 增加 15 分钟补偿检查任务
     scheduler.add_job(check_daily_task_job, 'interval', minutes=15)
