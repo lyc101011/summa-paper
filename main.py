@@ -60,6 +60,10 @@ class DailyAgent:
         raw_papers = self.fetcher.fetch_recent_papers(target_date=date_str)
         if not raw_papers:
             logger.info("今日未获取到新论文。")
+            empty_msg = "今日 arXiv 未发布相关领域的新论文，或全天无更新。"
+            self.storage.save_daily_report(empty_msg, "", date_str)
+            await self.feishu.send_markdown(f"Arxiv 每日精选 - {date_str}", empty_msg)
+            logger.info("=== Daily Arxiv Agent 查无记录，执行完毕 ===")
             return
             
         high_quality_papers = []
