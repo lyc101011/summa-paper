@@ -145,7 +145,7 @@ class DailyAgent:
         from app.core.prompts import REPORT_GENERATOR_PROMPT
         prompt = REPORT_GENERATOR_PROMPT.format(papers_content=papers_context_for_feishu)
         try:
-            markdown_summary = await self.processor.llm_service.chat_completion(
+            markdown_summary = await self.processor.llm_service.chat_completion_stream(
                 model=self.processor.llm_service.llm_model,
                 messages=[{"role": "user", "content": prompt}]
             )

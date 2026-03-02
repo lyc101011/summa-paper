@@ -31,7 +31,7 @@ class PaperProcessor:
         
         try:
             # We are expecting text output describing the deep review
-            response = await self.llm_service.chat_completion(
+            response = await self.llm_service.chat_completion_stream(
                 model=self.llm_service.llm_model,
                 messages=messages
             )
@@ -72,7 +72,7 @@ class PaperProcessor:
         ]
         
         try:
-            response = await self.llm_service.chat_completion(
+            response = await self.llm_service.chat_completion_stream(
                 model=self.llm_service.llm_model,
                 messages=messages
             )
@@ -97,7 +97,7 @@ class PaperProcessor:
         messages = [{"role": "user", "content": prompt}]
         
         try:
-            response = await self.llm_service.chat_completion(
+            response = await self.llm_service.chat_completion_stream(
                 model=self.llm_service.llm_model,
                 messages=messages
             )
