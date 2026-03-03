@@ -165,13 +165,12 @@ class DailyAgent:
 agent = DailyAgent()
 scheduler = AsyncIOScheduler(timezone=pytz.timezone('Asia/Shanghai'))
 
-def scheduled_job():
+async def scheduled_job():
     """Timer job for apscheduler to trigger agent run."""
     logger.info("Scheduler triggered daily arXiv extraction.")
-    # AsyncIOScheduler will automatically run the coroutine in its event loop
-    asyncio.create_task(agent.run())
+    await agent.run()
 
-def check_daily_task_job():
+async def check_daily_task_job():
     """Run every 15 minutes to check if today's task is completed."""
     now = datetime.now(pytz.timezone('Asia/Shanghai'))
     from datetime import timedelta
@@ -184,7 +183,7 @@ def check_daily_task_job():
     if not os.path.exists(report_path):
         if not getattr(agent, "is_running", False):
             logger.info(f"15分钟巡检: 检测到今日报表 {report_path} 未生成，且系统未在运行，已触发补偿执行。")
-            asyncio.create_task(agent.run())
+            await agent.run(yesterday_str)
         else:
             logger.info("15分钟巡检: 任务正在执行中，无需补偿。")
     else:
