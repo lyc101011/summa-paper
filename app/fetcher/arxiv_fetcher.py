@@ -24,9 +24,9 @@ class ArxivFetcher:
         else:
             # Midnight today in arXiv time
             today_midnight = now_arxiv.replace(hour=0, minute=0, second=0, microsecond=0)
-            target_start = today_midnight - timedelta(days=1)
+            target_start = today_midnight - timedelta(days=5) # 往前多抓5天，通过本地历史记录去重
             
-        target_end_arxiv = target_start + timedelta(days=1)
+        target_end_arxiv = today_midnight if not target_date else target_start + timedelta(days=1)
         
         # Convert arXiv EST/EDT midnight boundaries to UTC for the query
         start_utc = target_start.astimezone(pytz.utc)

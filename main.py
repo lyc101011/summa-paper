@@ -75,6 +75,11 @@ class DailyAgent:
             # 检查是否曾在历史中处理过并且成功
             cached_file_path = global_papers.get(paper_id)
             if cached_file_path:
+                # 若缓存的路径是之前的日期，说明是历史记录，无需加入今天的报表
+                if date_str not in cached_file_path:
+                    logger.debug(f"论文 {paper_id} 属于跨日历史记录，直接跳过。")
+                    continue
+                    
                 # Load the specific daily file where this paper was processed
                 import os
                 if os.path.exists(cached_file_path):
@@ -173,6 +178,11 @@ async def scheduled_job():
 async def check_daily_task_job():
     """Run every 15 minutes to check if today's task is completed."""
     now = datetime.now(pytz.timezone('Asia/Shanghai'))
+    
+    # 早于 13:00 时暂不执行补偿（主任务设在 12:00，留一小时完成窗口）
+    if now.hour < 13:
+        return
+    
     from datetime import timedelta
     yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
     
@@ -192,18 +202,18 @@ async def check_daily_task_job():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the background scheduler on app startup and shutdown."""
-    # Example: Run every day at 09:00 AM Shanghai time
-    scheduler.add_job(scheduled_job, 'cron', hour=7, minute=0)
+    # Example: Run every day at 12:00 PM Shanghai time
+    scheduler.add_job(scheduled_job, 'cron', hour=12, minute=0)
     
     # 增加 15 分钟补偿检查任务
     scheduler.add_job(check_daily_task_job, 'interval', minutes=15)
     
     scheduler.start()
-    logger.info("APScheduler started: daily arxiv task scheduled at 09:00 AM, with 15-minute compensation checks.")
+    logger.info("APScheduler started: daily arxiv task scheduled at 12:00 PM, with 15-minute compensation checks.")
     
-    # 检查补偿逻辑：如果当前时间大于 9 点且昨天的论文还没处理过，立即触发一次
+    # 检查补偿逻辑：如果当前时间大于 13 点且昨天的论文还没处理过，立即触发一次
     now = datetime.now(pytz.timezone('Asia/Shanghai'))
-    if now.hour >= 9:
+    if now.hour >= 13:
         from datetime import timedelta
         yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
         
